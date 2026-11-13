@@ -705,7 +705,7 @@ export function stopGroup() {
 
 // ── Send Message ─────────────────────────────────────
 
-export async function sendMessage(msg) {
+export async function sendMessage(msg, attachmentIds = []) {
   if (!_active || !_models.length) return;
 
   const box = document.getElementById('chat-history');
@@ -721,9 +721,9 @@ export async function sendMessage(msg) {
   }
 
   if (_mode === 'parallel') {
-    await _sendParallel(msg, box);
+    await _sendParallel(msg, box, attachmentIds);
   } else {
-    await _sendRoundRobin(msg, box);
+    await _sendRoundRobin(msg, box, attachmentIds);
   }
 }
 
@@ -749,14 +749,14 @@ function _createGroupBubble(model, box) {
   return wrap;
 }
 
-async function _sendParallel(msg, box) {
+async function _sendParallel(msg, box, attachmentIds) {
   const holders = _models.map(m => _createGroupBubble(m, box));
   uiModule.scrollHistory();
 
   // Stream all models in parallel
   _abortControllers = _models.map(() => new AbortController());
   const results = await Promise.allSettled(_models.map((m, i) =>
-    _streamToHolder(i, _participantSessions[i], msg, holders[i], _abortControllers[i])
+    _streamToHolder(i, _participantSessions[i], msg, holders[i], _abortControllers[i], attachmentIds)
   ));
   _abortControllers = [];
 
@@ -766,7 +766,7 @@ async function _sendParallel(msg, box) {
   await _syncAllResponses(holders);
 }
 
-async function _sendRoundRobin(msg, box) {
+async function _sendRoundRobin(msg, box, attachmentIds) {
   // Randomize who goes first each message — shuffle participant indices
   // (Fisher–Yates) instead of a fixed rotation, so the order varies turn to
   // turn. Each model still takes its turn seeing all responses already given
@@ -786,7 +786,7 @@ async function _sendRoundRobin(msg, box) {
 
     const ac = new AbortController();
     _abortControllers = [ac];
-    await _streamToHolder(idx, _participantSessions[idx], msg, wrap, ac);
+    await _streamToHolder(idx, _participantSessions[idx], msg, wrap, ac, attachmentIds);
     _abortControllers = [];
 
     // After each response, inject it into all OTHER participant sessions
@@ -838,7 +838,7 @@ async function _syncAllResponses(holders) {
   }
 }
 
-async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
+async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl, attachmentIds = []) {
   if (!sessionId) {
     holderEl.querySelector('.body').innerHTML = '<i style="opacity:0.5;">[Session creation failed]</i>';
     return;
@@ -847,6 +847,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
   const fd = new FormData();
   fd.append('message', msg);
   fd.append('session', sessionId);
+  if (attachmentIds && attachmentIds.length) fd.append('attachments', JSON.stringify(attachmentIds));
 
   let accumulated = '';
   let _buffer = '';

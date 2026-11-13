@@ -3967,13 +3967,19 @@ function startOdysseusApp() {
       console.log('[group] Submit intercepted');
       const msgInput = document.getElementById('message');
       const msg = msgInput ? msgInput.value.trim() : '';
-      if (!msg) { console.log('[group] Empty message, skipping'); return; }
+      const attInfo = fileHandlerModule.getPendingCount() ? fileHandlerModule.getPendingInfo() : null;
+      if (!msg && !attInfo) { console.log('[group] Empty message, skipping'); return; }
       console.log('[group] Sending:', msg);
       chatRenderer.hideWelcomeScreen();
-      chatRenderer.addMessage('user', msg);
+      const userEl = chatRenderer.addMessage('user', msg, null, attInfo ? { attachments: attInfo } : {});
       msgInput.value = '';
-      groupModule.sendMessage(msg);
-      return;
+      return (async () => {
+        // Upload composer attachments once and hand the ids to every participant (#6348).
+        const ids = attInfo ? await fileHandlerModule.uploadPending({ sessionId: sessionModule.getCurrentSessionId() }) : [];
+        if (attInfo && !ids.length) { if (userEl) userEl.remove(); msgInput.value = msg; return; }
+        if (attInfo && userEl) chatRenderer.updateMessageAttachments(userEl, attInfo.map((a, i) => ({ ...a, id: ids[i] })));
+        groupModule.sendMessage(msg, ids);
+      })();
     }
 
     chatRenderer.hideWelcomeScreen();
