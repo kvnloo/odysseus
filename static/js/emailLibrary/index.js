@@ -5188,23 +5188,28 @@ export async function _loadEmails({ force = false, useCache = true, skipFastPath
 }
 
 async function _loadScheduled(grid, sp) {
-  const res = await fetch(`${API_BASE}/api/email/scheduled`);
+  const [res, drafts] = await Promise.all([
+    fetch(`${API_BASE}/api/email/scheduled`),
+    _loadAgentDrafts(),
+  ]);
   const data = await res.json();
   if (sp) sp.destroy();
   const items = data.scheduled || [];
   grid.innerHTML = '';
   const stats = document.getElementById('email-lib-stats');
-  if (stats) stats.textContent = `${items.length} scheduled`;
+  if (stats) stats.textContent = `${items.length} scheduled` + (drafts.length ? ` · ${drafts.length} awaiting approval` : '');
   _setEmailSyncStatus({
     updatedAt: new Date().toISOString(),
     source: 'local',
     loading: false,
   });
 
-  if (items.length === 0) {
+  if (items.length === 0 && drafts.length === 0) {
     grid.innerHTML = '<div class="email-loading">No scheduled emails</div>';
     return;
   }
+
+  for (const d of drafts) grid.appendChild(_agentDraftCard(d));
 
   for (const it of items) {
     const card = document.createElement('div');
@@ -5254,6 +5259,60 @@ async function _loadScheduled(grid, sp) {
 
     grid.appendChild(card);
   }
+}
+
+// With `agent_email_confirm` on (the default) the agent's send_email only
+// stages an `agent_draft`; nothing sends it until the user approves it here.
+async function _loadAgentDrafts() {
+  try {
+    const res = await fetch(`${API_BASE}/api/email/pending`);
+    return res.ok ? ((await res.json()).pending || []) : [];
+  } catch { return []; }
+}
+
+function _agentDraftCard(d) {
+  const card = document.createElement('div');
+  card.className = 'doclib-card memory-item';
+  const subject = d.subject || '(no subject)';
+  const content = document.createElement('div');
+  content.style.cssText = 'flex:1;min-width:0;';
+  content.innerHTML = `
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span class="memory-item-title">${_esc(subject)}</span>
+      <span style="font-size:9px;color:var(--accent);border:1px solid var(--accent);padding:1px 4px;border-radius:4px;">AWAITING APPROVAL</span>
+    </div>
+    <div style="font-size:10px;opacity:0.7;margin-top:2px;">To: ${_esc(d.to_addr || '(no recipient)')} · Drafted by the agent</div>
+    <div style="font-size:11px;opacity:0.85;margin-top:4px;white-space:pre-wrap;max-height:8em;overflow:auto;">${_esc(d.body || '')}</div>
+    <div class="agent-draft-error" style="font-size:10px;color:var(--red);margin-top:2px;"></div>
+  `;
+  card.appendChild(content);
+  const act = async (method, path) => {
+    const res = await fetch(`${API_BASE}/api/email/pending/${encodeURIComponent(d.id)}${path}`, { method });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok && out.success) return _loadEmails();
+    content.querySelector('.agent-draft-error').textContent = out.error || `Request failed (${res.status})`;
+  };
+  const approveBtn = document.createElement('button');
+  approveBtn.className = 'memory-item-btn';
+  approveBtn.dataset.agentDraftAction = 'approve';
+  approveBtn.title = 'Approve and send';
+  approveBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  approveBtn.addEventListener('click', (e) => { e.stopPropagation(); act('POST', '/approve'); });
+  const discardBtn = document.createElement('button');
+  discardBtn.className = 'memory-item-btn';
+  discardBtn.dataset.agentDraftAction = 'discard';
+  discardBtn.title = 'Discard draft';
+  discardBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+  discardBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const { styledConfirm } = await import('../ui.js?v=20260916largetoolscroll1');
+    if (await styledConfirm(`Discard the agent's draft "${subject}"?`, { confirmText: 'Discard', cancelText: 'Keep', danger: true })) act('DELETE', '');
+  });
+  const actionsWrap = document.createElement('div');
+  actionsWrap.className = 'memory-item-actions';
+  actionsWrap.append(approveBtn, discardBtn);
+  card.appendChild(actionsWrap);
+  return card;
 }
 
 function _emailDateBucketLabel(value) {
