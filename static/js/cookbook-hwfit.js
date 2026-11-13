@@ -36,6 +36,7 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import spinnerModule from './spinner.js';
 import { _loadTasks, _tmuxGracefulKill, _nextAvailablePort, _taskPort } from './cookbookRunning.js';
 import { openCookbookDependencies } from './cookbook-diagnosis.js';
+import { missingGgufNote } from './cookbookGgufSource.js';
 
 // Map a serve-backend code (vllm / sglang / llamacpp / mlx) → the package name
 // the Dependencies API reports. Used to look up "is this backend installed
@@ -1737,6 +1738,8 @@ export function _expandModelRow(row, modelData) {
       html += `<div class="hwfit-panel-note">This is a safetensors GPU-serving format. Use vLLM/SGLang with a visible CUDA/ROCm accelerator, or pick a GGUF download for llama.cpp/Ollama.</div>`;
     }
   }
+  const ggufNote = missingGgufNote(modelData, backend);
+  if (ggufNote) html += `<div class="hwfit-panel-note hwfit-missing-gguf-note">${esc(ggufNote)}</div>`;
   html += `</div>`;
 
   row.insertAdjacentHTML('afterend', html);

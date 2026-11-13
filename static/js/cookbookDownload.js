@@ -6,6 +6,7 @@
 
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis.js';
+import { _ggufDownloadSource, _missingGgufMessage } from './cookbookGgufSource.js';
 
 // Shared state/functions injected by init()
 let _envState;
@@ -66,27 +67,6 @@ export function _setPanelCheckbox(panel, field, checked) {
 
 // ── Command builder: download ──
 
-function _firstGgufSource(model) {
-  const sources = Array.isArray(model?.gguf_sources) ? model.gguf_sources : [];
-  return sources.find(src => src && src.repo) || null;
-}
-
-function _looksLikeGgufRepo(model) {
-  const haystack = `${model?.quant_repo || ''} ${model?.repo_id || ''} ${model?.path || ''} ${model?.name || ''}`.toLowerCase();
-  return !!model?.is_gguf || haystack.includes('gguf') || haystack.includes('.gguf');
-}
-
-function _ggufDownloadSource(model, backend) {
-  if (backend !== 'llamacpp') return null;
-  const source = _firstGgufSource(model);
-  if (source) return source;
-  if (_looksLikeGgufRepo(model)) {
-    const repo = model?.quant_repo || model?.repo_id || model?.name;
-    if (repo) return { repo };
-  }
-  return null;
-}
-
 function _ggufIncludePattern(model, source) {
   if (source?.file) return source.file;
   if (model?.quant) return `*${model.quant}*`;
@@ -107,14 +87,6 @@ function _downloadTaskName(shortName, payload) {
   const include = payload?.include || '';
   const part = include ? _ggufDisplayPartFromInclude(include) : '';
   return part ? `${shortName} · ${part}` : shortName;
-}
-
-function _missingGgufMessage(model) {
-  const name = model?.name || 'this model';
-  if (/\bnvfp4\b/i.test(name)) {
-    return `${name} is an NVIDIA NVFP4 checkpoint, not a GGUF download. Pick the base model row with an Unsloth GGUF source, or paste the GGUF repo directly.`;
-  }
-  return `No GGUF source is configured for ${name}. Pick a model with a GGUF source, or paste the GGUF repo in Download.`;
 }
 
 function _bashQuote(value) {
