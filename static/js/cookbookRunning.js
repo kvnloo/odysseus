@@ -2876,8 +2876,13 @@ export function _renderRunningTab() {
         };
         // Close on scroll too — once the page scrolls, the dropdown's
         // fixed position no longer matches the originating ⋮ button, so
-        // it visually drifts. Matches the email kebab behaviour.
-        const scrollClose = () => _cleanup();
+        // it visually drifts. Matches the email kebab behaviour. Ignore
+        // scrollers that don't contain the button (e.g. a download's log
+        // auto-scrolling as output arrives): the button didn't move (#2829).
+        const scrollClose = (ev) => {
+          if (ev?.target instanceof Node && !ev.target.contains(menuBtn)) return;
+          _cleanup();
+        };
         let _unreg = () => {};
         const _cleanup = () => {
           _unreg(); _unreg = () => {};
