@@ -1461,7 +1461,14 @@ export function _hwfitRenderList(el, models) {
     if (tpsRaw > 9999) tpsRaw = 9999;
     const tps = tpsRaw > 0 ? (tpsRaw >= 100 ? Math.round(tpsRaw) : tpsRaw.toFixed(1)) : '?';
     const pcount = m.parameter_count || '?';
-    const ctx = m.context ? (m.context >= 1024 ? (m.context / 1024).toFixed(0) + 'k' : m.context) : '?';
+    const _ctxK = (n) => (n >= 1024 ? (n / 1024).toFixed(0) + 'k' : String(n));
+    const ctx = m.context ? _ctxK(m.context) : '?';
+    // The row is estimated at the Ctx filter target (or less if memory is
+    // tight), not the model's max, so say so when they differ (#3098).
+    const ctxCapped = !!m.context && Number(m.context_length) > m.context;
+    const ctxTitle = ctxCapped
+      ? `Estimated at ${ctx} context (Ctx filter or memory limit). Model supports up to ${_ctxK(Number(m.context_length))}.`
+      : '';
     const fitLabel = (m.fit_level || '').replace('_', ' ');
     const modeLabel = _modeLabel(m);
     const vramLabel = m.required_gb ? m.required_gb.toFixed(1) + 'G' : '?';
@@ -1496,7 +1503,7 @@ export function _hwfitRenderList(el, models) {
     const _qRaw = m.quant || '?';
     const _qShort = _qRaw.length > 9 ? _qRaw.slice(0, 9) + '…' : _qRaw;
     html += `<span class="hwfit-col hwfit-c-quant" title="${esc(_qRaw)}">${esc(_qShort)}</span>`;
-    html += `<span class="hwfit-col hwfit-c-ctx">${m.is_image_gen ? '\u2014' : ctx}</span>`;
+    html += `<span class="hwfit-col hwfit-c-ctx${ctxCapped ? ' hwfit-ctx-capped' : ''}"${ctxCapped ? ` title="${esc(ctxTitle)}"` : ''}>${m.is_image_gen ? '\u2014' : ctx}</span>`;
     html += `<span class="hwfit-col hwfit-c-speed">${m.is_image_gen ? '\u2014' : tps + ' t/s'}</span>`;
     html += `<span class="hwfit-col hwfit-c-score">${score}</span>`;
     html += `<span class="hwfit-col hwfit-c-mode" title="${_requiresAcceleratorBackend(m) ? 'Requires vLLM or SGLang with a visible CUDA/ROCm accelerator. llama.cpp and Ollama need GGUF files.' : ''}">${esc(modeLabel)}</span>`;

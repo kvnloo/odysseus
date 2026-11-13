@@ -550,6 +550,7 @@
 .hwfit-c-quant  { width: 52px; }
 .hwfit-c-vram   { width: 42px; }
 .hwfit-c-ctx    { width: 32px; }
+.hwfit-ctx-capped { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 .hwfit-c-speed  { width: 44px; }
 .hwfit-c-mode   { width: 72px; }
 @keyframes hwfit-panel-in {
