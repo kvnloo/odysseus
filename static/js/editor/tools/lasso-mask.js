@@ -18,14 +18,15 @@
 export function lassoOffsetPoints(points, grow) {
   const n = points.length;
   if (n < 3 || !grow) return points;
-  // Polygon winding (positive = CCW) — flip the normal so it points
-  // away from the interior regardless of draw direction.
+  // Winding via the shoelace sum (positive = counter-clockwise on screen,
+  // where y points down). (dy, -dx) is the inward normal for a
+  // counter-clockwise polygon, so flip it there to point outward.
   let area = 0;
   for (let i = 0; i < n; i++) {
     const p = points[i], q = points[(i + 1) % n];
     area += (q.x - p.x) * (q.y + p.y);
   }
-  const sign = area > 0 ? 1 : -1;
+  const sign = area > 0 ? -1 : 1;
   const out = new Array(n);
   for (let i = 0; i < n; i++) {
     const a = points[(i - 1 + n) % n], b = points[i], c = points[(i + 1) % n];
