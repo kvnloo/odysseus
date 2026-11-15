@@ -1,0 +1,2 @@
+uninstall-no-record-file
+no RECORD file was found for <pkg>

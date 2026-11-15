@@ -1,0 +1,2 @@
+.../odysseus-tmux/serve-XXXX_run.sh: line 25: llama-server: command not found
+=== Process exited with code 127 ===

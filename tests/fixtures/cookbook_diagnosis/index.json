@@ -1,0 +1,60 @@
+[
+  {
+    "file": "4516-metadata-generation-failed.txt",
+    "source_issue": 4516,
+    "quoted": "\"Failed to build…\" / \"metadata-generation-failed\"; basicsr named as the example package",
+    "expected_message": "A dependency failed to build during install — usually an older package whose build breaks on this Python version, not a server problem. The install did not finish.",
+    "gap": false,
+    "baseline": "correct",
+    "baseline_message": "A dependency failed to build during install — usually an older package whose build breaks on this Python version, not a server problem. The install did not finish."
+  },
+  {
+    "file": "4516-traceback-could-not-build-wheels.txt",
+    "source_issue": 4516,
+    "quoted": "`Traceback (most recent call last)`, `subprocess-exited-with-error`, `Could not build wheels` (the traceback must not win over the build failure)",
+    "expected_message": "A dependency failed to build during install — usually an older package whose build breaks on this Python version, not a server problem. The install did not finish.",
+    "gap": false,
+    "baseline": "correct",
+    "baseline_message": "A dependency failed to build during install — usually an older package whose build breaks on this Python version, not a server problem. The install did not finish."
+  },
+  {
+    "file": "4516-build-error-then-server-healthy.txt",
+    "source_issue": 4516,
+    "quoted": "build-failure strings plus the healthy-server markers `Uvicorn running on` / `Application startup complete` the fix suppresses on",
+    "expected_message": null,
+    "gap": false,
+    "baseline": "correct",
+    "baseline_message": null
+  },
+  {
+    "file": "4569-uninstall-no-record-file.txt",
+    "source_issue": 4569,
+    "quoted": "`uninstall-no-record-file` / \"no RECORD file was found for <pkg>\"",
+    "expected_message": null,
+    "gap": true,
+    "expected_desc": "corrupted dist-info (no RECORD file): delete the orphaned <pkg>-*.dist-info, reinstall, avoid concurrent installs; no Edit serve",
+    "baseline": "none",
+    "baseline_message": null
+  },
+  {
+    "file": "2697-fp4-flashinfer-cutlass-compile.txt",
+    "source_issue": 2697,
+    "quoted": "the compile-phase terms the issue lists: `flashinfer`, `fp4_gemm_cutlass`, `CUTLASS`, `nvcc`, `cicc`",
+    "expected_message": null,
+    "gap": true,
+    "expected_desc": "first-run vLLM FP4/FlashInfer kernel compile: wait if healthy, free RAM/swap, limit build parallelism",
+    "baseline": "none",
+    "baseline_message": null
+  },
+  {
+    "file": "5177-windows-llama-server-not-found.txt",
+    "source_issue": 5177,
+    "quoted": "the ```text block in the issue, Windows temp path shortened",
+    "expected_message": null,
+    "gap": true,
+    "expected_desc": "native llama-server binary missing on local Windows; pip llama-cpp-python[server] does not provide it",
+    "baseline": "wrong",
+    "note": "On dev@0096533c the tmux entry (`tmux.*not found`) wins because the run script lives in an `odysseus-tmux` directory; the llama-server entry that follows would also be wrong per #5177 (it suggests pip llama-cpp-python[server]).",
+    "baseline_message": "tmux is missing on this server."
+  }
+]

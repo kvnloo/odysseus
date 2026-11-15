@@ -1,0 +1,2 @@
+error: metadata-generation-failed
+Failed to build basicsr
