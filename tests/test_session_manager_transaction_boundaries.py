@@ -118,3 +118,127 @@ def test_add_message_rolls_back_memory_when_database_commit_fails(monkeypatch):
 
     finally:
         engine.dispose()
+
+
+def test_add_message_rejects_missing_upload_without_phantom_history(monkeypatch):
+    """An unavailable attachment must not leave a message in cached history."""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    LocalSession = sessionmaker(bind=engine)
+    session_id = "missing-attachment-transaction-test"
+
+    try:
+        db = LocalSession()
+        try:
+            db.add(DbSession(
+                id=session_id,
+                name="Attachment transaction test",
+                endpoint_url="http://localhost",
+                model="test-model",
+                owner="alice",
+                message_count=1,
+            ))
+            db.add(DbChatMessage(
+                id="durable-before-failure",
+                session_id=session_id,
+                role="user",
+                content="Previously saved",
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        monkeypatch.setattr(sm, "SessionLocal", LocalSession)
+        monkeypatch.setattr(
+            sm,
+            "reserve_message_upload_references",
+            lambda *args, **kwargs: "expired-upload",
+        )
+
+        manager = sm.SessionManager.__new__(sm.SessionManager)
+        manager.upload_handler = None
+        cached_session = Session(
+            id=session_id,
+            name="Attachment transaction test",
+            endpoint_url="http://localhost",
+            model="test-model",
+            owner="alice",
+            history=[ChatMessage("user", "Previously saved")],
+        )
+        cached_session.message_count = 1
+        manager.sessions = {session_id: cached_session}
+        monkeypatch.setattr(
+            manager, "get_session", lambda requested_id: cached_session
+        )
+
+        original_history = cached_session.history
+        message = ChatMessage(
+            "user",
+            "Unpersistable attachment",
+            metadata={"attachments": [{"id": "expired-upload"}]},
+        )
+        with pytest.raises(ValueError, match="no longer available"):
+            manager.add_message(session_id, message)
+
+        assert cached_session.history is original_history
+        assert cached_session._history is original_history
+        assert [m.content for m in cached_session.history] == ["Previously saved"]
+        assert cached_session.message_count == 1
+
+        check = LocalSession()
+        try:
+            rows = check.query(DbChatMessage).filter(
+                DbChatMessage.session_id == session_id
+            ).all()
+            assert [row.content for row in rows] == ["Previously saved"]
+            assert check.get(DbSession, session_id).message_count == 1
+        finally:
+            check.close()
+    finally:
+        engine.dispose()
+
+
+def test_create_session_keeps_endpoint_options_when_fix_is_applied(monkeypatch):
+    """A persistence fix must not remove existing create_session API options."""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    LocalSession = sessionmaker(bind=engine)
+
+    try:
+        monkeypatch.setattr(sm, "SessionLocal", LocalSession)
+        manager = sm.SessionManager.__new__(sm.SessionManager)
+        manager.sessions = {}
+        session = manager.create_session(
+            "endpoint-options-regression",
+            "Endpoint options",
+            "http://localhost:8000/v1",
+            "test-model",
+            owner="alice",
+            cwd="/project/worktree",
+            headers={"X-Session-Test": "preserved"},
+            endpoint_id="local-provider",
+        )
+
+        assert session.cwd == "/project/worktree"
+        assert session.endpoint_id == "local-provider"
+        assert session.headers == {"X-Session-Test": "preserved"}
+
+        check = LocalSession()
+        try:
+            row = check.get(DbSession, "endpoint-options-regression")
+            assert row is not None
+            assert row.cwd == "/project/worktree"
+            assert row.endpoint_id == "local-provider"
+            assert row.headers == {"X-Session-Test": "preserved"}
+        finally:
+            check.close()
+    finally:
+        engine.dispose()
