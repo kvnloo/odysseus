@@ -573,7 +573,9 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
     || profiles.find(p => Number(p?.ctx) > 0)
     || null;
   const modelMax = Math.max(1024, _modelContextMaxForServe(model, modelCtxMax));
-  if (preferred && Number(preferred.ctx) > 0) {
+  const modelGb = _modelSizeGb(model, modelWeightsGb);
+  const kvEstimate = _llamaKvGbPerToken(model, fields.gguf_file, fields.cache_type, modelGb);
+  if (preferred && Number(preferred.ctx) > 0 && !kvEstimate.fromMetadata) {
     const ctx = Math.min(modelMax, Number(preferred.ctx));
     return {
       ctx,
@@ -582,7 +584,6 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
   }
 
   const sys = fitSystem || _hwfitCache?.system || {};
-  const modelGb = _modelSizeGb(model, modelWeightsGb);
   const backend = String(fields.backend || '').toLowerCase();
   const llamaMode = String(fields.llama_mode || '').toLowerCase();
   const isCpuMode = backend === 'llamacpp' && llamaMode === 'cpu';
@@ -632,12 +633,11 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
     ? Math.max(1, unifiedPoolGb - Math.max(2.0, unifiedPoolGb * 0.08))
     : Math.max(1, totalVramGb - Math.max(1.0, selectedCount * 0.6));
   const freeForKv = usableGb - modelGb;
-  const kv = String(fields.cache_type || '').toLowerCase();
-  const kvFactor = kv === 'q4_0' ? 0.55 : (kv === 'q8_0' ? 1 : (kv === 'f16' ? 1.9 : 1));
-  const kvGbPerToken = Math.max(0.00008, (modelGb / 7.5) * 0.0007 * kvFactor);
+  const kvGbPerToken = kvEstimate.gbPerToken;
   if (freeForKv <= 0) {
     return {
-      ctx: Math.min(modelMax, 8192),
+      ctx: 0,
+      doesNotFit: true,
       modelGb,
       kvGbPerToken,
       reason: `model ${modelGb.toFixed(1)}G exceeds usable ${isUnifiedMode ? 'unified memory' : 'VRAM'} ${usableGb.toFixed(1)}G before KV`,
@@ -677,7 +677,7 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
     ctx,
     modelGb,
     kvGbPerToken,
-    reason: `~${ctx.toLocaleString()} tokens fits llama.cpp KV (${freeForKv.toFixed(1)}G free ${isUnifiedMode ? 'unified' : 'VRAM'}${reasonSuffix})`,
+    reason: `~${ctx.toLocaleString()} tokens fits llama.cpp KV (${freeForKv.toFixed(1)}G free ${isUnifiedMode ? 'unified' : 'VRAM'}; ${kvEstimate.fromMetadata ? 'GGUF metadata' : 'size heuristic'}${reasonSuffix})`,
   };
 }
 
@@ -957,6 +957,24 @@ function _runnableGgufFiles(model) {
   const files = _ggufFilesForModel(model);
   const primary = files.filter(f => (f.role || 'model') === 'model');
   return primary.length ? primary : files;
+}
+
+function _llamaKvGbPerToken(model, relPath, cacheType, modelGb) {
+  // The scanner reads GGUF attention metadata from the exact selected file.
+  // GQA/MQA KV cost depends on layers and KV heads, not quantized weight size.
+  const files = _runnableGgufFiles(model);
+  const file = files.find(f => f.rel_path === relPath) || (files.length === 1 ? files[0] : null);
+  const bytesF16 = Number(file?.kv_bytes_per_token_f16 || 0);
+  const cache = String(cacheType || '').toLowerCase();
+  if (Number.isFinite(bytesF16) && bytesF16 > 0) {
+    // ggml Q4_0: 18 bytes/32 values; Q8_0: 34/32; F16: 2/value.
+    // Missing cache type means llama.cpp's default f16 KV cache.
+    const factor = cache === 'q4_0' ? 9 / 32 : (cache === 'q8_0' ? 17 / 32 : 1);
+    return { gbPerToken: (bytesF16 / (1024 ** 3)) * factor, fromMetadata: true };
+  }
+  // Existing size heuristic is reserved for missing/invalid GGUF metadata.
+  const factor = cache === 'q4_0' ? 0.55 : (cache === 'q8_0' ? 1 : (cache === 'f16' ? 1.9 : 1));
+  return { gbPerToken: Math.max(0.00008, (modelGb / 7.5) * 0.0007 * factor), fromMetadata: false };
 }
 
 function _selectedGgufSizeGb(model, relPath) {
@@ -2012,6 +2030,13 @@ function _rerenderCachedModels() {
           if (_ctxAutoNote) _ctxAutoNote.textContent = '';
           return;
         }
+        if (fit.doesNotFit) {
+          if (_ctxAutoNote) {
+            _ctxAutoNote.textContent = `No GPU-only fit · ${fit.reason}`;
+            _ctxAutoNote.title = fit.reason;
+          }
+          return; // Keep the user's manual context value unchanged.
+        }
         if ((fit.needsHardwareScan || fit.needsModelSize) && !fit.ctx) {
           if (_ctxAutoNote) {
             _ctxAutoNote.textContent = fit.reason;
@@ -2025,7 +2050,7 @@ function _rerenderCachedModels() {
             ? 'unified system memory'
             : 'selected GPU memory';
           _ctxAutoNote.title = backend === 'llamacpp' || backend === 'ollama'
-            ? `Estimated from scanned GGUF/model size, trained context limit, and ${_llamaMemoryLabel} for llama.cpp KV cache.`
+            ? `Estimated from GGUF attention metadata when available (model-size fallback), trained context limit, and ${_llamaMemoryLabel}.`
             : backend === 'mlx'
             ? `MLX-LM server does not expose a context-length flag; Cookbook maps this estimate to MLX --max-tokens using scanned unified memory and model size.`
             : `Estimated from model size, selected GPU VRAM, GPU utilization, TP, and KV dtype.`;
@@ -3535,13 +3560,9 @@ function _rerenderCachedModels() {
           try {
             const _ctx = Math.max(1, parseInt(serveState.ctx, 10) || 8192);
             // Model size on disk — close enough for GPU footprint of a GGUF.
-            const _modelBytes = Number(m?.size_bytes || 0) || Math.round((Number(m?.size_gb || 0)) * 1024 * 1024 * 1024);
-            const _modelGb = _modelBytes / (1024 ** 3);
-            // KV cache heuristic. ~0.7MB / token / 7.5GB-of-model at fp16
-            // KV, scaled linearly by model size. Imperfect but covers
-            // the common 7B–70B range within ~20% — good enough to catch
-            // overflow before it silently happens.
-            const _kvGbPerToken = _modelGb > 0 ? (_modelGb / 7.5) * 0.0007 : 0.0007;
+            const _modelGb = _selectedGgufSizeGb(m, serveState.gguf_file) || _modelSizeGb(m);
+            // Match Auto context's per-file attention metadata and cache dtype.
+            const _kvGbPerToken = _llamaKvGbPerToken(m, serveState.gguf_file, serveState.cache_type, _modelGb).gbPerToken;
             const _kvGb = _ctx * _kvGbPerToken;
             const _needGb = _modelGb + _kvGb;
             const _selStr = (serveState.gpus || '').trim();

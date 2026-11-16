@@ -373,13 +373,97 @@ def _user_shell_path_bootstrap() -> list[str]:
     ]
 
 
-def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache: str | None = None) -> str:
+GGUF_KV_HELPER = """
+def gguf_kv_bytes_f16(path):
+    # Standalone scan runs locally or over SSH; read only the GGUF metadata,
+    # without requiring gguf/llama_cpp packages or loading tensor contents.
+    import struct
+    scalar_sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4,
+                    6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+    try:
+        with open(path, 'rb') as stream:
+            def read(size):
+                data = stream.read(size)
+                if len(data) != size:
+                    raise ValueError('truncated GGUF metadata')
+                return data
+            def number(fmt):
+                return struct.unpack('<' + fmt, read(struct.calcsize(fmt)))[0]
+
+            if read(4) != b'GGUF' or number('I') not in (2, 3):
+                return 0
+            number('Q')  # tensor count (tensor payload is never read)
+            count = number('Q')
+            if count > 16384:
+                return 0
+            fields = {}
+            for _ in range(count):
+                key_len = number('Q')
+                if key_len > 4096:
+                    break
+                key = read(key_len).decode('utf-8', 'replace')
+                kind = number('I')
+                if kind == 8:  # string
+                    length = number('Q')
+                    if length > 1024 * 1024:
+                        break
+                    stream.seek(length, 1)
+                elif kind == 9:  # array
+                    item_type, length = number('I'), number('Q')
+                    if item_type == 8:  # string array; token vocab may be huge
+                        if length > 65536:
+                            break
+                        for _ in range(length):
+                            item_len = number('Q')
+                            if item_len > 1024 * 1024:
+                                raise ValueError('oversized GGUF string')
+                            stream.seek(item_len, 1)
+                    elif item_type in scalar_sizes and length <= 100000000:
+                        stream.seek(length * scalar_sizes[item_type], 1)
+                    else:
+                        break
+                elif kind in scalar_sizes:
+                    data = read(scalar_sizes[kind])
+                    if kind in (0, 1, 2, 3, 4, 5, 10, 11):
+                        if key.endswith(('.block_count',
+                                         '.attention.head_count_kv',
+                                         '.attention.head_count',
+                                         '.attention.key_length',
+                                         '.attention.value_length',
+                                         '.embedding_length')):
+                            fields[key] = int.from_bytes(
+                                data, 'little', signed=kind in (1, 3, 5, 11))
+                else:
+                    break
+
+            def get(suffix):
+                return next((value for key, value in fields.items()
+                             if key.endswith('.' + suffix) and value > 0), 0)
+
+            layers = get('block_count')
+            kv_heads = get('attention.head_count_kv') or get('attention.head_count')
+            key_dim = get('attention.key_length')
+            value_dim = get('attention.value_length')
+            if not key_dim or not value_dim:
+                width, heads = get('embedding_length'), get('attention.head_count')
+                if width and heads and width % heads == 0:
+                    key_dim = key_dim or width // heads
+                    value_dim = value_dim or width // heads
+            # Two caches (keys and values), each f16 element is 2 bytes.
+            bytes_per_token = layers * kv_heads * (key_dim + value_dim) * 2
+            return bytes_per_token if 0 < bytes_per_token < 1024 ** 3 else 0
+    except (OSError, ValueError, OverflowError, struct.error):
+        return 0
+
+
+"""def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache: str | None = None) -> str:
     """Build the standalone Python scanner used by /api/model/cached.
     Allows for an additional HuggingFace cache path to be scanned (i.e. Windows HF cache for local WSL envs.)
     """
     lines = [
         "import json, os, re, shutil, subprocess, urllib.request",
         *HF_PARTIAL_BLOB_HELPER.splitlines(),
+        *GGUF_KV_HELPER.splitlines(),
         "models = []",
         "seen = set()",
         "BLOCKED_ROOTS = ('/sys', '/proc', '/dev', '/run', '/var/run')",
@@ -422,8 +506,13 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "                g['size_bytes'] += size",
         "                if int(part_s) == 1:",
         "                    g.update({'name':fn,'rel_path':rel,'role':gguf_role(fn),'quant':gguf_quant(fn)})",
+        "                    kv_bytes = gguf_kv_bytes_f16(fp)",
+        "                    if kv_bytes: g['kv_bytes_per_token_f16'] = kv_bytes",
         "                continue",
-        "            files.append({'name':fn,'rel_path':rel,'size_bytes':size,'role':gguf_role(fn),'quant':gguf_quant(fn)})",
+        "            entry = {'name':fn,'rel_path':rel,'size_bytes':size,'role':gguf_role(fn),'quant':gguf_quant(fn)}",
+        "            kv_bytes = gguf_kv_bytes_f16(fp)",
+        "            if kv_bytes: entry['kv_bytes_per_token_f16'] = kv_bytes",
+        "            files.append(entry)",
         "    files.extend(split_groups.values())",
         "    files.sort(key=lambda f: (f.get('role') != 'model', f.get('rel_path', '')))",
         "    return files",
