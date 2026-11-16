@@ -402,7 +402,14 @@ def _append_local_ollama_download_command_lines(
         lines.append(f'    ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote("docker exec ${ODYSSEUS_OLLAMA_CONTAINER} " + ollama_cmd)}')
         lines.append('  fi')
     elif docker_fallback_blocked:
-        hint = shlex.quote("ERROR: " + HOST_DOCKER_ACCESS_HINT)
+        # A missing Ollama CLI is the primary error; Docker is an optional fallback.
+        hint = shlex.quote(
+            "ERROR: Ollama is not installed or not on PATH in this environment. "
+            "Install Ollama on the download target, connect an existing Ollama "
+            "server in Settings, or download a GGUF for llama.cpp. "
+            "The optional Docker container fallback is unavailable because "
+            "host Docker daemon access is disabled."
+        )
         lines.append('else')
         lines.append(f"  printf '%s\\n' {hint}; exit 127")
     lines.append('fi')
