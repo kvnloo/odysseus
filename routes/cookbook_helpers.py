@@ -456,7 +456,10 @@ def gguf_kv_bytes_f16(path):
         return 0
 
 
-"""def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache: str | None = None) -> str:
+"""
+
+
+def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache: str | None = None) -> str:
     """Build the standalone Python scanner used by /api/model/cached.
     Allows for an additional HuggingFace cache path to be scanned (i.e. Windows HF cache for local WSL envs.)
     """
