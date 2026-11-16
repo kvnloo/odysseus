@@ -42,9 +42,14 @@ export function _importFromDevice() {
   const fi = document.createElement('input');
   fi.type = 'file';
   fi.style.display = 'none';
+  // The picker is appended only for this one dialog; cancellation must not retain it.
+  fi.addEventListener('cancel', () => fi.remove(), { once: true });
   fi.addEventListener('change', async () => {
     const file = fi.files?.[0];
-    if (!file) return;
+    if (!file) {
+      fi.remove();
+      return;
+    }
     const name = file.name;
     const dotIdx = name.lastIndexOf('.');
     const ext = dotIdx >= 0 ? name.slice(dotIdx).toLowerCase() : '';
