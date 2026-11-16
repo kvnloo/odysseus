@@ -575,7 +575,9 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
   const modelMax = Math.max(1024, _modelContextMaxForServe(model, modelCtxMax));
   const modelGb = _modelSizeGb(model, modelWeightsGb);
   const kvEstimate = _llamaKvGbPerToken(model, fields.gguf_file, fields.cache_type, modelGb);
-  if (preferred && Number(preferred.ctx) > 0 && !kvEstimate.fromMetadata) {
+  const sys = fitSystem || _hwfitCache?.system || {};
+  if (preferred && Number(preferred.ctx) > 0 && !kvEstimate.fromMetadata
+      && !Array.isArray(sys.gpu_live?.gpus)) {
     const ctx = Math.min(modelMax, Number(preferred.ctx));
     return {
       ctx,
@@ -583,7 +585,6 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
     };
   }
 
-  const sys = fitSystem || _hwfitCache?.system || {};
   const backend = String(fields.backend || '').toLowerCase();
   const llamaMode = String(fields.llama_mode || '').toLowerCase();
   const isCpuMode = backend === 'llamacpp' && llamaMode === 'cpu';
@@ -606,12 +607,35 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
 
   const gpuIds = String(fields.gpus || '').split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite);
   const selectedCount = Math.max(1, gpuIds.length || parseInt(fields.tp, 10) || 1);
+  const live = sys.gpu_live;
+  let liveFreeGb = null;
+  // Probe free_mb accounts for WSL2/display allocations; total VRAM does not.
+  // Use the selected GPU indices, never the first GPU or an incomplete set.
+  if (!isUnifiedMode && Array.isArray(live?.gpus)
+      && String(live.host || '') === String(fields.host || '')) {
+    const ids = gpuIds.length ? [...new Set(gpuIds)] : (selectedCount === 1 ? [0] : []);
+    if (ids.length !== selectedCount) {
+      return { needsHardwareScan: true, reason: 'selected GPU set needs a fresh free-VRAM probe' };
+    }
+    let freeMb = 0;
+    for (const id of ids) {
+      const gpu = live.gpus.find(g => Number(g?.index) === id);
+      const free = Number(gpu?.free_mb);
+      const total = Number(gpu?.total_mb);
+      if (!gpu || !Number.isFinite(free) || !Number.isFinite(total)
+          || free < 0 || total <= 0) {
+        return { needsHardwareScan: true, reason: `GPU ${id} free VRAM unavailable; probe selected GPU` };
+      }
+      freeMb += Math.min(free, total);
+    }
+    liveFreeGb = freeMb / 1024; // MiB to GiB; zero remains a valid reading.
+  }
   const groups = Array.isArray(sys.gpu_groups) ? sys.gpu_groups : [];
   const activeGroup = sys.active_group || groups[0] || null;
   const totalVramGb = Number(activeGroup?.vram_each)
     ? Number(activeGroup.vram_each) * selectedCount
     : (Number(sys.gpu_vram_gb) || 0);
-  if (!totalVramGb) {
+  if (!totalVramGb && liveFreeGb === null) {
     return {
       ctx: Math.min(modelMax, 32768),
       modelGb,
@@ -629,9 +653,14 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
         totalRamGb > 0 ? totalRamGb * 0.85 : 0
       )
     : totalVramGb;
+  const overheadGb = Math.max(1.0, selectedCount * 0.6);
   const usableGb = isUnifiedMode
     ? Math.max(1, unifiedPoolGb - Math.max(2.0, unifiedPoolGb * 0.08))
-    : Math.max(1, totalVramGb - Math.max(1.0, selectedCount * 0.6));
+    : liveFreeGb !== null
+      ? Math.max(0, liveFreeGb - overheadGb)
+      : Math.max(1, totalVramGb - overheadGb);
+  const memorySource = isUnifiedMode ? 'unified memory estimate'
+    : (liveFreeGb !== null ? 'selected GPU live free VRAM' : 'total VRAM estimate');
   const freeForKv = usableGb - modelGb;
   const kvGbPerToken = kvEstimate.gbPerToken;
   if (freeForKv <= 0) {
@@ -640,10 +669,19 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
       doesNotFit: true,
       modelGb,
       kvGbPerToken,
-      reason: `model ${modelGb.toFixed(1)}G exceeds usable ${isUnifiedMode ? 'unified memory' : 'VRAM'} ${usableGb.toFixed(1)}G before KV`,
+      reason: `model ${modelGb.toFixed(1)}G exceeds usable ${memorySource} ${usableGb.toFixed(1)}G before KV`,
     };
   }
   const raw = Math.floor(freeForKv / kvGbPerToken);
+  if (raw < 1024) {
+    return {
+      ctx: 0,
+      doesNotFit: true,
+      modelGb,
+      kvGbPerToken,
+      reason: `less than 1,024 tokens fit ${memorySource} after model weights`,
+    };
+  }
   const rounded = Math.max(1024, Math.floor(raw / 1024) * 1024);
   let ctx = Math.min(modelMax, rounded);
   let reasonSuffix = '';
@@ -677,7 +715,7 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
     ctx,
     modelGb,
     kvGbPerToken,
-    reason: `~${ctx.toLocaleString()} tokens fits llama.cpp KV (${freeForKv.toFixed(1)}G free ${isUnifiedMode ? 'unified' : 'VRAM'}; ${kvEstimate.fromMetadata ? 'GGUF metadata' : 'size heuristic'}${reasonSuffix})`,
+    reason: `~${ctx.toLocaleString()} tokens fits llama.cpp KV (${freeForKv.toFixed(1)}G free ${isUnifiedMode ? 'unified' : 'VRAM'}; ${kvEstimate.fromMetadata ? 'GGUF metadata' : 'size heuristic'}; ${memorySource}${reasonSuffix})`,
   };
 }
 
@@ -1997,6 +2035,7 @@ function _rerenderCachedModels() {
       panel._modelCtxMax = panel._modelCtxMax || _knownModelContextMax(m) || 0;
       panel._modelWeightsGb = panel._modelWeightsGb || 0;
       panel._fitSystem = panel._fitSystem || null;
+      panel._liveGpuMemory = null;
       const _ctxEl0 = panel.querySelector('[data-field="ctx"]');
       const _ctxAutoNote = panel.querySelector('.hwfit-auto-ctx-note');
       const _ctxCalcBtn = panel.querySelector('.hwfit-context-calc-btn');
@@ -2021,7 +2060,15 @@ function _rerenderCachedModels() {
           fit = _estimateMlxContextFit(m, f, panel._modelCtxMax, panel._modelWeightsGb, panel._fitSystem);
         } else if (backend === 'llamacpp' || backend === 'ollama') {
           const ggufGb = _selectedGgufSizeGb(m, f.gguf_file);
-          fit = _estimateLlamaContextFit(m, f, panel._modelCtxMax, ggufGb || panel._modelWeightsGb, panel._fitSystem, panel._contextProfileData);
+          const target = _selectedServeTarget(panel);
+          const live = panel._liveGpuMemory;
+          const baseSystem = panel._fitSystem || _hwfitCache?.system || {};
+          const matchingLive = live && live.host === String(target.host || '').trim()
+            && live.port === String(target.port || '')
+            && Date.now() - live.observedAt < 15000;
+          const system = matchingLive ? { ...baseSystem, gpu_live: live } : baseSystem;
+          fit = _estimateLlamaContextFit(m, { ...f, host: target.host || '' },
+            panel._modelCtxMax, ggufGb || panel._modelWeightsGb, system, panel._contextProfileData);
         } else {
           if (_ctxAutoNote) _ctxAutoNote.textContent = '';
           return;
@@ -2134,6 +2181,32 @@ function _rerenderCachedModels() {
               if (calcWp) calcWp.destroy();
               _ctxCalcBtn.disabled = false;
               _ctxCalcBtn.innerHTML = oldHtml;
+            }
+            // Probe live free VRAM on the selected host immediately before Auto.
+            panel._liveGpuMemory = null;
+            const f = _collectServeFields();
+            if (['llamacpp', 'ollama'].includes(String(f.backend || '').toLowerCase())
+                && String(f.llama_mode || 'gpu').toLowerCase() !== 'cpu') {
+              const target = _selectedServeTarget(panel);
+              const host = String(target.host || '').trim();
+              const port = String(target.port || '');
+              const params = new URLSearchParams();
+              if (host) {
+                params.set('host', host);
+                if (port) params.set('ssh_port', port);
+              }
+              try {
+                const url = '/api/cookbook/gpus' + (params.toString() ? '?' + params : '');
+                const res = await _fetchCookbookWithTimeout(url, { credentials: 'same-origin' }, 10000);
+                if (!res.ok) throw Error('GPU probe unavailable');
+                const data = await res.json();
+                if (data?.ok === false) throw Error('GPU probe unavailable');
+                const gpus = Array.isArray(data) ? data : (Array.isArray(data.gpus) ? data.gpus : []);
+                panel._liveGpuMemory = { host, port, observedAt: Date.now(), gpus };
+              } catch {
+                // Fall back to a labeled total-VRAM estimate; never reuse stale data.
+                panel._liveGpuMemory = null;
+              }
             }
             _ctxEl0.dataset.autoCtx = '1';
             _updateRecommendedCtx(true);
