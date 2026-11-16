@@ -43,6 +43,27 @@ def test_static_server_serves_this_worktree() -> None:
         assert r.headers.get_content_type() == "application/javascript"
 
 
+
+def test_css_snapshot_cli_server_serves_stylesheet_behind_idle_socket(tmp_path) -> None:
+    """Standalone CSS checks must not stall behind a speculative connection."""
+    from tests.helpers.cli_loader import load_script
+
+    snapshot = load_script("css_snapshot.py")
+    content = b".sample { color: red; }"
+    (tmp_path / "styles.css").write_bytes(content)
+
+    origin, shutdown = snapshot.serve_repository(tmp_path)
+    address = urlsplit(origin)
+    try:
+        # Browsers may hold an idle socket open while requesting CSS elsewhere.
+        with socket.create_connection((address.hostname, address.port), timeout=5):
+            with urllib.request.urlopen(f"{origin}/styles.css", timeout=5) as response:
+                assert response.status == 200
+                assert response.headers.get_content_type() == "text/css"
+                assert response.read() == content
+    finally:
+        shutdown()
+
 def test_no_test_hardcodes_the_static_server_origin() -> None:
     """Regression guard: a hardcoded port reintroduces the collision."""
 

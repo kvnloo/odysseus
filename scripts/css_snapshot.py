@@ -35,6 +35,7 @@ import http.server
 import json
 import os
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
@@ -203,8 +204,10 @@ def serve_repository(root=ROOT):
                 return "text/css"
             return super().guess_type(path)
 
-    class Server(socketserver.TCPServer):
-        allow_reuse_address = True
+    class Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = daemon_threads = True
+        # Capture can open concurrent stylesheets behind speculative idle sockets.
+        request_queue_size = socket.SOMAXCONN
 
     server = Server(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
