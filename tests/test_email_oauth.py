@@ -331,9 +331,9 @@ async def test_callback_tampered_state_returns_generic_error_no_leak():
 
 @pytest.mark.asyncio
 async def test_callback_owner_mismatch_does_not_write_tokens():
-    """A signed, valid state whose owner does not match the target account's
-    owner must NOT write tokens — this blocks one authenticated user from
-    binding their Google account onto another user's mailbox row.
+    """A signed state targeting a different owner must not contact Google
+    *or* write tokens. A safe final redirect alone does not protect the
+    authorization code from the earlier pre-validation exchange.
     """
     from routes.email_helpers import make_oauth_state
     from core.database import EmailAccount
@@ -342,8 +342,8 @@ async def test_callback_owner_mismatch_does_not_write_tokens():
     _make_account(db, account_id="acct-x", owner="alice")
     db.close()
 
-    # Token-exchange + userinfo would succeed — the point is the ownership gate
-    # rejects the write *before* trusting them.
+    # These provider calls would succeed, but the callback must reject the
+    # foreign account before it ever sends the authorization code to Google.
     token_resp = mock.MagicMock()
     token_resp.raise_for_status = mock.MagicMock()
     token_resp.json.return_value = {"access_token": "ya29.attacker", "refresh_token": "r", "expires_in": 3600}
@@ -354,14 +354,16 @@ async def test_callback_owner_mismatch_does_not_write_tokens():
     # State is genuinely signed, but for owner "bob" — not the row owner "alice".
     state = make_oauth_state("acct-x", "bob")
 
-    with mock.patch("httpx.post", return_value=token_resp), \
-         mock.patch("httpx.get", return_value=userinfo_resp), \
+    with mock.patch("httpx.post", return_value=token_resp) as token_exchange, \
+         mock.patch("httpx.get", return_value=userinfo_resp) as userinfo, \
          mock.patch("core.database.SessionLocal", Factory):
         callback = _callback_endpoint()
         resp = await callback(code="4/code", state=state, error=None, request=_FakeRequest())
 
     loc = _location(resp)
     assert "email_oauth_error=ownership_error" in loc
+    token_exchange.assert_not_called()
+    userinfo.assert_not_called()
 
     verify_db = Factory()
     row = verify_db.query(EmailAccount).filter(EmailAccount.id == "acct-x").first()
